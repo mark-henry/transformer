@@ -7,12 +7,9 @@ from transformers import BertTokenizer, BertConfig
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 config = BertConfig.from_pretrained('bert-base-uncased')
 
-
-
-
 vocab_size = tokenizer.vocab_size
-embedding_dim = config.hidden_size
-embedding = nn.Embedding(vocab_size, embedding_dim)
+embedding_size = config.hidden_size
+embedding = nn.Embedding(vocab_size, embedding_size)
 
 example_text = ["Hello, how are you today?"]
 encoded_inputs = tokenizer(example_text, padding=True, truncation=True, return_tensors="pt")
@@ -23,27 +20,28 @@ embedded = embedding(input_ids)
 import numpy as np
 import torch
 
-def positional_encoding(max_seq_len, d_model):
+
+def positional_encoding(seq_len, d_model):
     # PE(pos, 2i) = sin(pos / 10000^(2i/d_model))
     # PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
 
-    position = np.arange(max_seq_len)[:, np.newaxis]
+    position = np.arange(seq_len)[:, np.newaxis]
     div_term = np.exp(np.arange(0, d_model, 2) * -(np.log(10000.0) / d_model))
 
-    pos_encoding = np.zeros((max_seq_len, d_model))
+    pos_encoding = np.zeros((seq_len, d_model))
     pos_encoding[:, 0::2] = np.sin(position * div_term)
     pos_encoding[:, 1::2] = np.cos(position * div_term)
 
     return torch.FloatTensor(pos_encoding)
 
+
 # %%
 class Attention(nn.Module):
-    def __init__(self, seq_len, model_dimension, key_dimension, values_dimension, *args, **kwargs):
+    def __init__(self, seq_len, model_dimension, key_dimension, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.seq_len = seq_len
         self.model_dimension = model_dimension
         self.key_dimension = key_dimension
-        self.values_dimension = values_dimension
         self.Q = nn.Linear(model_dimension, key_dimension)
         self.K = nn.Linear(model_dimension, key_dimension)
         self.V = nn.Linear(model_dimension, model_dimension)
@@ -54,27 +52,51 @@ class Attention(nn.Module):
 
     def forward(self, input):
         scale = math.sqrt(self.key_dimension)
-        attention_pattern = torch.matmul(self.K(input), self.Q(input)) / scale
+        attention_pattern = torch.matmul(self.Q(input), self.K(input).T) / scale
         masked_attn = attention_pattern.masked_fill(self.mask, float('-inf'))
-        attention = nn.Softmax(dim=1)(attention_pattern)
-        return self.V(attention)
+        attention = nn.Softmax(dim=1)(masked_attn)
+        return torch.matmul(attention, self.V(input))
+
+
+class DecoderLayer(nn.Module):
+    def __init__(self, embedding_size, seq_len, num_attention_heads, hidden_layer_size=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.embedding_size = embedding_size
+        self.seq_len = seq_len
+        self.num_attention_heads = num_attention_heads
+        self.attention_heads = [
+            Attention(seq_len, embedding_size,
+                      embedding_size / num_attention_heads)
+            for _ in range(num_attention_heads)
+        ]
+        self.layer_norm = nn.LayerNorm(seq_len, embedding_size)
+        self.hidden_layer_size = hidden_layer_size or 4 * embedding_size
+        self.feed_forward = nn.Sequential(
+            nn.Linear(embedding_size, self.hidden_layer_size),
+            nn.ReLU(),
+            nn.Linear(self.hidden_layer_size, embedding_size)
+        )
+
+    def forward(self, input):
+        attention_values = sum(head(input) for head in self.attention_heads)
+        attn_add_and_norm = self.layer_norm(input + attention_values)
+        ff_value = self.feed_forward(attn_add_and_norm)
+        return self.layer_norm(attn_add_and_norm + ff_value)
 
 
 class Transformer(nn.Module):
-    def __init__(self, embedding_size: int, vocab_size, max_seq_len=64, num_attention_heads=8, *args, **kwargs):
-        """
-        :model_dimension: the dimensionality of the embeddings
-        """
+    def __init__(self, embedding_size, vocab_size, seq_len=64, num_attention_heads=8, num_layers=6, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.max_seq_len = max_seq_len
+        self.seq_len = seq_len
         self.d_model = embedding_size
         self.embedding = nn.Embedding(vocab_size, embedding_size)
-        self.attention_heads = [Attention(max_seq_len, embedding_size, ?, ?) for _ in range(num_attention_heads)]
+        self.decoder_layers = nn.Sequential(
+            *[DecoderLayer(embedding_size, seq_len, num_attention_heads, *args, **kwargs)
+              for _ in range(num_layers)]
+        )
 
     def forward(self, token_ids):
         embedded = self.embedding(token_ids)
-        pe = positional_encoding(self.max_seq_len, self.d_model)
+        pe = positional_encoding(self.seq_len, self.d_model)
         pe_out = embedded + pe
-        attention_values = [head(pe_out) for head in self.attention_heads]
-
-
+        decoder_output = self.decoder_layers(pe_out)
