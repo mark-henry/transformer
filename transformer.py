@@ -2,19 +2,6 @@ import math
 
 import torch.nn as nn
 from torch._C._te import Tensor
-from transformers import BertTokenizer, BertConfig
-
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-config = BertConfig.from_pretrained('bert-base-uncased')
-
-vocab_size = tokenizer.vocab_size
-embedding_size = config.hidden_size
-embedding = nn.Embedding(vocab_size, embedding_size)
-
-example_text = ["Hello, how are you today?"]
-encoded_inputs = tokenizer(example_text, padding=True, truncation=True, return_tensors="pt")
-input_ids = encoded_inputs['input_ids']
-embedded = embedding(input_ids)
 
 # %%
 import numpy as np
@@ -66,10 +53,10 @@ class DecoderLayer(nn.Module):
         self.num_attention_heads = num_attention_heads
         self.attention_heads = [
             Attention(seq_len, embedding_size,
-                      embedding_size / num_attention_heads)
+                      embedding_size // num_attention_heads)
             for _ in range(num_attention_heads)
         ]
-        self.layer_norm = nn.LayerNorm(seq_len, embedding_size)
+        self.layer_norm = nn.LayerNorm([seq_len, embedding_size])
         self.hidden_layer_size = hidden_layer_size or 4 * embedding_size
         self.feed_forward = nn.Sequential(
             nn.Linear(embedding_size, self.hidden_layer_size),
@@ -85,18 +72,24 @@ class DecoderLayer(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, embedding_size, vocab_size, seq_len=64, num_attention_heads=8, num_layers=6, *args, **kwargs):
+    def __init__(self, embedding_size, vocab_size, pad_token_id, seq_len=64, num_attention_heads=8, num_layers=6, *args,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.seq_len = seq_len
-        self.d_model = embedding_size
+        self.embedding_size = embedding_size
         self.embedding = nn.Embedding(vocab_size, embedding_size)
-        self.decoder_layers = nn.Sequential(
-            *[DecoderLayer(embedding_size, seq_len, num_attention_heads, *args, **kwargs)
-              for _ in range(num_layers)]
+        decoder_layers = nn.Sequential(
+            *[DecoderLayer(embedding_size, seq_len, num_attention_heads, *args, **kwargs) for _ in range(num_layers)])
+        self.decoder = nn.Sequential(
+            decoder_layers,
+            nn.Linear(embedding_size, vocab_size),
+            nn.Softmax(dim=1)
         )
+        self.pad_token_id = pad_token_id
 
     def forward(self, token_ids):
         embedded = self.embedding(token_ids)
-        pe = positional_encoding(self.seq_len, self.d_model)
-        pe_out = embedded + pe
-        decoder_output = self.decoder_layers(pe_out)
+        pe = positional_encoding(self.seq_len, self.embedding_size)
+        encoded = embedded + pe
+        return self.decoder(encoded)
+
