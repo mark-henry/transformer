@@ -15,7 +15,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train a transformer model')
     parser.add_argument('--checkpoint', type=str, help='Path to existing model checkpoint')
     parser.add_argument('--epochs', type=int, default=3, help='Number of epochs to train')
-    parser.add_argument('--batch-size', type=int, default=8, help='Batch size for training')
+    parser.add_argument('--batch-size', type=int, default=16, help='Batch size for training')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--context-size', type=int, default=512, help='Context size for transformer')
     return parser.parse_args()
@@ -48,8 +48,6 @@ def load_or_create_model(checkpoint_path, hidden_size, vocab_size, pad_token_id,
         start_epoch = checkpoint['epoch'] + 1
         best_loss = checkpoint['loss']
         print(f"Resumed from epoch {start_epoch} with best loss {best_loss:.4f}")
-    else:
-        print("Starting training from scratch")
 
     return model, optimizer, start_epoch, best_loss
 

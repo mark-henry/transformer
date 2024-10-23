@@ -2,6 +2,7 @@ import math
 import torch.nn as nn
 import torch
 
+
 class Attention(nn.Module):
     def __init__(self, seq_len, model_dimension, key_dimension, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -22,18 +23,20 @@ class Attention(nn.Module):
         attention = nn.Softmax(dim=-1)(masked_attn)
         return torch.bmm(attention, self.V(input))
 
+
 class DecoderLayer(nn.Module):
     def __init__(self, embedding_size, seq_len, num_attention_heads, ff_size=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.embedding_size = embedding_size
         self.seq_len = seq_len
         self.num_attention_heads = num_attention_heads
-        key_dim = embedding_size // num_attention_heads  # AIAYN recommends d_k = d_v = d_model/h = 64
+        key_dim = embedding_size // num_attention_heads  # AIAYN recommends d_k = d_v = d_model/h
         self.attention_heads = nn.ModuleList([
             Attention(seq_len, embedding_size, key_dim)
             for _ in range(num_attention_heads)
         ])
-        self.layer_norm = nn.LayerNorm([seq_len, embedding_size])
+        self.layer_norm1 = nn.LayerNorm(embedding_size)
+        self.layer_norm2 = nn.LayerNorm(embedding_size)
         ff_size = ff_size or 4 * embedding_size
         self.feed_forward = nn.Sequential(
             nn.Linear(embedding_size, ff_size),
@@ -43,11 +46,13 @@ class DecoderLayer(nn.Module):
 
     def forward(self, input):
         attention_values = torch.stack([head(input) for head in self.attention_heads]).sum(0)
-        attn_add_and_norm = self.layer_norm(input + attention_values)
-        return self.layer_norm(attn_add_and_norm + self.feed_forward(attn_add_and_norm))
+        attn_add_and_norm = self.layer_norm1(input + attention_values)
+        return self.layer_norm2(attn_add_and_norm + self.feed_forward(attn_add_and_norm))
+
 
 class Transformer(nn.Module):
-    def __init__(self, embedding_size, vocab_size, pad_token_id, seq_len=64, num_attention_heads=8, num_layers=6, *args, **kwargs):
+    def __init__(self, embedding_size, vocab_size, pad_token_id, seq_len=64, num_attention_heads=8, num_layers=6, *args,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.seq_len = seq_len
         self.embedding_size = embedding_size
