@@ -1,14 +1,13 @@
 import math
 
 import torch.nn as nn
-from torch._C._te import Tensor
 
 # %%
 import numpy as np
 import torch
 
 
-def positional_encoding(seq_len, d_model):
+def positional_encoding(seq_len, d_model, device):
     # PE(pos, 2i) = sin(pos / 10000^(2i/d_model))
     # PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
 
@@ -19,7 +18,7 @@ def positional_encoding(seq_len, d_model):
     pos_encoding[:, 0::2] = np.sin(position * div_term)
     pos_encoding[:, 1::2] = np.cos(position * div_term)
 
-    return torch.FloatTensor(pos_encoding)
+    return torch.FloatTensor(pos_encoding).to(device)
 
 
 # %%
@@ -33,9 +32,8 @@ class Attention(nn.Module):
         self.K = nn.Linear(model_dimension, key_dimension)
         self.V = nn.Linear(model_dimension, model_dimension)
 
-        mask = torch.ones(self.seq_len, self.seq_len)
-        # Make it lower triangular and invert
-        self.mask: Tensor = torch.tril(mask) == 0
+        mask = torch.ones(seq_len, seq_len)
+        self.register_buffer('mask', torch.tril(mask) == 0)
 
     def forward(self, input):
         scale = math.sqrt(self.key_dimension)
@@ -51,11 +49,10 @@ class DecoderLayer(nn.Module):
         self.embedding_size = embedding_size
         self.seq_len = seq_len
         self.num_attention_heads = num_attention_heads
-        self.attention_heads = [
-            Attention(seq_len, embedding_size,
-                      embedding_size // num_attention_heads)
+        self.attention_heads = nn.ModuleList([
+            Attention(seq_len, embedding_size, embedding_size // num_attention_heads)
             for _ in range(num_attention_heads)
-        ]
+        ])
         self.layer_norm = nn.LayerNorm([seq_len, embedding_size])
         self.hidden_layer_size = hidden_layer_size or 4 * embedding_size
         self.feed_forward = nn.Sequential(
@@ -67,8 +64,7 @@ class DecoderLayer(nn.Module):
     def forward(self, input):
         attention_values = sum(head(input) for head in self.attention_heads)
         attn_add_and_norm = self.layer_norm(input + attention_values)
-        ff_value = self.feed_forward(attn_add_and_norm)
-        return self.layer_norm(attn_add_and_norm + ff_value)
+        return self.layer_norm(attn_add_and_norm + self.feed_forward(attn_add_and_norm))
 
 
 class Transformer(nn.Module):
@@ -77,6 +73,7 @@ class Transformer(nn.Module):
         super().__init__(*args, **kwargs)
         self.seq_len = seq_len
         self.embedding_size = embedding_size
+        self.register_buffer('pe', self._create_positional_encoding(seq_len, embedding_size))
         self.embedding = nn.Embedding(vocab_size, embedding_size)
         decoder_layers = nn.Sequential(
             *[DecoderLayer(embedding_size, seq_len, num_attention_heads, *args, **kwargs) for _ in range(num_layers)])
@@ -87,9 +84,17 @@ class Transformer(nn.Module):
         )
         self.pad_token_id = pad_token_id
 
+    @staticmethod
+    def _create_positional_encoding(seq_len, d_model):
+        position = torch.arange(seq_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(seq_len, d_model)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        return pe
+
     def forward(self, token_ids):
-        embedded = self.embedding(token_ids)
-        pe = positional_encoding(self.seq_len, self.embedding_size)
-        encoded = embedded + pe
-        return self.decoder(encoded)
+            embedded = self.embedding(token_ids)
+            encoded = embedded + self.pe
+            return self.decoder(encoded)
 

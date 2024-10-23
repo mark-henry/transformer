@@ -1,16 +1,15 @@
 # chat.py
 import torch
 from transformers import AutoTokenizer
+from accelerate import Accelerator
 from pathlib import Path
-from transformers import BertConfig
-from train import pad
-
 
 # Import your model definition
-from transformer import Transformer
-
+from training import Transformer, pad, BertConfig
 
 def load_model(model_path):
+    accelerator = Accelerator()
+
     # Initialize tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
     config = BertConfig.from_pretrained('bert-base-uncased')
@@ -25,16 +24,19 @@ def load_model(model_path):
     # Load the saved state
     checkpoint = torch.load(model_path, weights_only=True)
     model.load_state_dict(checkpoint['model_state_dict'])
+
+    # Prepare model with accelerator
+    model = accelerator.prepare(model)
     model.eval()
 
-    return model, tokenizer
+    return model, tokenizer, accelerator
 
-
-def generate_text(model, tokenizer, prompt, max_length=50, temperature=0.7):
+def generate_text(model, tokenizer, accelerator, prompt, max_length=50, temperature=0.7):
     model.eval()
 
-    # Encode the prompt
-    input_ids = tokenizer.encode(prompt, return_tensors='pt')[0]  # Shape: (seq_length,)
+    # Encode the prompt and move to correct device
+    input_ids = tokenizer.encode(prompt, return_tensors='pt')[0]
+    input_ids = accelerator.prepare(input_ids)
 
     # Generate tokens one at a time
     generated = []
@@ -42,6 +44,7 @@ def generate_text(model, tokenizer, prompt, max_length=50, temperature=0.7):
         for _ in range(max_length):
             # Pad sequence to context size
             padded_sequence = pad(input_ids, model.seq_len)
+            padded_sequence = accelerator.prepare(padded_sequence)
 
             # Get model predictions
             outputs = model(padded_sequence)
@@ -51,10 +54,9 @@ def generate_text(model, tokenizer, prompt, max_length=50, temperature=0.7):
 
             # Sample from the distribution
             probs = torch.softmax(next_token_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1).squeeze()  # Make sure it's 1D
+            next_token = torch.multinomial(probs, num_samples=1).squeeze()
 
             generated.append(next_token.item())
-            # Make sure both tensors are 1D before concatenating
             input_ids = torch.cat([input_ids, next_token.view(-1)])
 
             # Stop if we generate [SEP] token
@@ -63,14 +65,13 @@ def generate_text(model, tokenizer, prompt, max_length=50, temperature=0.7):
 
     return tokenizer.decode(generated)
 
-
 def main():
     # Load latest model from models directory
     model_files = list(Path("models").glob("transformer_*.pt"))
     latest_model = max(model_files, key=lambda p: p.stat().st_mtime)
     print(f"Loading model: {latest_model}")
 
-    model, tokenizer = load_model(latest_model)
+    model, tokenizer, accelerator = load_model(latest_model)
 
     print("Chat with the model (type 'quit' to exit)")
     while True:
@@ -78,9 +79,8 @@ def main():
         if prompt.lower() == 'quit':
             break
 
-        response = generate_text(model, tokenizer, prompt)
+        response = generate_text(model, tokenizer, accelerator, prompt)
         print(f"Model: {response}")
-
 
 if __name__ == "__main__":
     main()
