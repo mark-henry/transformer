@@ -51,19 +51,19 @@ class DecoderLayer(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, embedding_size, vocab_size, pad_token_id, seq_len=64, num_attention_heads=8, num_layers=6, *args,
-                 **kwargs):
+    def __init__(self, embedding_size, vocab_size, pad_token_id,
+                 embedding=None, seq_len=64, num_attention_heads=8, num_layers=6, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.seq_len = seq_len
         self.embedding_size = embedding_size
         self.register_buffer('pe', self._create_positional_encoding(seq_len, embedding_size))
-        self.embedding = nn.Embedding(vocab_size, embedding_size)
+        self.embedding = embedding or nn.Embedding(vocab_size, embedding_size)
+        nn.init.normal_(self.embedding.weight, mean=0, std=embedding_size ** -0.5)  # Claude recommended this randomness
         decoder_layers = nn.Sequential(
             *[DecoderLayer(embedding_size, seq_len, num_attention_heads, *args, **kwargs) for _ in range(num_layers)])
         self.decoder = nn.Sequential(
             decoder_layers,
-            nn.Linear(embedding_size, vocab_size),
-            nn.Softmax(dim=-1)
+            nn.Linear(embedding_size, vocab_size)
         )
         self.pad_token_id = pad_token_id
 
