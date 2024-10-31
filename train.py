@@ -1,4 +1,5 @@
 import math
+import os
 
 from datasets import load_dataset
 from torch.utils.data import DataLoader
@@ -20,14 +21,15 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=1, help='Number of epochs to train')
     parser.add_argument('--batch-size', type=int, default=32, help='Batch size for training')
     # batch_size 150 for 80 GB 1A100.22V
-    # batch_size 22  for 16 GB 1V100.6V
+    # Tesla V100-SXM2-16GB context 64 batch_size 192
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--context-size', type=int, default=512, help='Context size for transformer')
-    parser.add_argument('--embedding-size', type=int, default=512, help='Model embedding size')
+    parser.add_argument('--embedding-size', type=int, default=768, help='Model embedding size')
     parser.add_argument('--head-count', type=int, default=8, help='How many heads of attention')
     parser.add_argument('--layer-count', type=int, default=6, help='How many layers in the transformer')
     parser.add_argument('--train-embeddings', action='store_true',
                         help='Train embeddings from scratch instead of using BERT pretrained')
+    parser.add_argument("--dataset", type=str, default="Salesforce/wikitext/wikitext-2-v1", help="HF dataset path and name to train on")
     return parser.parse_args()
 
 
@@ -39,11 +41,9 @@ def tokenize_function(examples, tokenizer, context_size):
         max_length=context_size
     )
 
-    # Remove special tokens (except padding which we need for batching)
+    # Filter special tokens from each sequence
     special_tokens = [tokenizer.cls_token_id, tokenizer.sep_token_id,
                       tokenizer.mask_token_id]
-
-    # Filter special tokens from each sequence
     cleaned_ids = []
     for seq in outputs['input_ids']:
         cleaned = [token for token in seq if token not in special_tokens]
@@ -60,9 +60,10 @@ def load_or_create_model(checkpoint_path, embedding_size, vocab_size, pad_token_
     """Initialize model, optimizer, and training state, optionally from checkpoint."""
     # Get pretrained embeddings if not training from scratch
     embedding = None
-    if not train_embeddings:
+    if not train_embeddings and not checkpoint_path:
         print("Loading pretrained BERT embeddings...")
         bert = AutoModel.from_pretrained('bert-base-uncased')
+        print("BERT embeddings loaded")
         embedding = bert.embeddings.word_embeddings
         embedding_size = bert.config.hidden_size
 
@@ -118,13 +119,19 @@ def train():
     accelerator = Accelerator()
 
     print("tokenizing dataset...")
-    dataset = load_dataset("wikitext", "wikitext-2-v1")
+    dataset_head, dataset_name = os.path.split(args.dataset)
+    dataset = load_dataset(dataset_head, dataset_name)
     tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 
     tokenized_dataset = dataset.map(
         lambda x: tokenize_function(x, tokenizer, args.context_size),
         batched=True,
-        remove_columns=dataset["train"].column_names
+        remove_columns=dataset["train"].column_names,
+        cache_file_names={
+            "test": f"cache/tokenized/{args.dataset}/test",
+            "train": f"cache/tokenized/{args.dataset}/train",
+            "validation": f"cache/tokenized/{args.dataset}/validation"
+        }
     )
     tokenized_dataset.set_format("torch")
 
@@ -144,6 +151,7 @@ def train():
         model, optimizer, criterion, train_dataloader, val_dataloader
     )
 
+    print("Starting training.", flush=True)
     Path("models").mkdir(exist_ok=True)
     model_path = f"models/transformer_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pt"
 
