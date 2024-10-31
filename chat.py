@@ -27,15 +27,15 @@ def load_model(model_path):
     # Get sequence length from positional encoding
     seq_len = model_state['pe'].shape[0]
 
-    # Count attention heads
+    # Count attention heads from first layer
     head_count = sum(1 for k in model_state.keys()
-                     if 'decoder.0.0.attention_heads' in k
+                     if k.startswith('decoder_layers.0.attention_heads.')
                      and k.endswith('.Q.weight'))
 
     # Count layers
     layer_count = sum(1 for k in model_state.keys()
-                      if 'decoder.0.' in k
-                      and '.attention_heads.0.Q.weight' in k)
+                      if k.startswith('decoder_layers.')
+                      and k.endswith('.layer_norm1.weight'))
 
     print(f"Loaded model config: embedding_size={embedding_size}, seq_len={seq_len}, "
           f"heads={head_count}, layers={layer_count}")

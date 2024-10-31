@@ -12,15 +12,33 @@ class Attention(nn.Module):
         self.Q = nn.Linear(model_dimension, key_dimension)
         self.K = nn.Linear(model_dimension, key_dimension)
         self.V = nn.Linear(model_dimension, model_dimension)
-        mask = torch.ones(seq_len, seq_len)
-        self.register_buffer('mask', torch.tril(mask) == 0)
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len)) == 0
+        self.register_buffer('causal_mask', causal_mask)
 
-    def forward(self, input):
+    def forward(self, input, padding_mask=None):
         batch_size = input.shape[0]
         scale = math.sqrt(self.key_dimension)
         attention_pattern = torch.bmm(self.Q(input), self.K(input).transpose(1, 2)) / scale
-        masked_attn = attention_pattern.masked_fill(self.mask.expand(batch_size, -1, -1), float('-inf'))
-        attention = nn.Softmax(dim=-1)(masked_attn)
+
+        mask = self.causal_mask.expand(batch_size, -1, -1)
+
+        if padding_mask is not None:
+            # Mask attention TO padded tokens
+            mask = mask | padding_mask.unsqueeze(1)
+            # Mask attention FROM padded tokens
+            mask = mask | padding_mask.unsqueeze(2)
+
+        # Apply combined mask
+        attention_pattern = attention_pattern.masked_fill(mask, float('-inf'))
+
+        # Check for any rows that are completely masked
+        all_neg = (attention_pattern == float('-inf')).all(dim=-1)
+        if all_neg.any():
+            # For rows that are all masked, create a uniform distribution
+            attention_pattern = attention_pattern.clone()
+            attention_pattern[all_neg] = 0.0
+
+        attention = nn.Softmax(dim=-1)(attention_pattern)
         return torch.bmm(attention, self.V(input))
 
 
@@ -44,8 +62,8 @@ class DecoderLayer(nn.Module):
             nn.Linear(ff_size, embedding_size)
         )
 
-    def forward(self, input):
-        attention_values = torch.stack([head(input) for head in self.attention_heads]).sum(0)
+    def forward(self, input, padding_mask=None):
+        attention_values = torch.stack([head(input, padding_mask) for head in self.attention_heads]).mean(0)
         attn_add_and_norm = self.layer_norm1(input + attention_values)
         return self.layer_norm2(attn_add_and_norm + self.feed_forward(attn_add_and_norm))
 
@@ -56,16 +74,19 @@ class Transformer(nn.Module):
         super().__init__(*args, **kwargs)
         self.seq_len = seq_len
         self.embedding_size = embedding_size
-        self.register_buffer('pe', self._create_positional_encoding(seq_len, embedding_size))
-        self.embedding = embedding or nn.Embedding(vocab_size, embedding_size)
-        nn.init.normal_(self.embedding.weight, mean=0, std=embedding_size ** -0.5)  # Claude recommended this randomness
-        decoder_layers = nn.Sequential(
-            *[DecoderLayer(embedding_size, seq_len, num_attention_heads, *args, **kwargs) for _ in range(num_layers)])
-        self.decoder = nn.Sequential(
-            decoder_layers,
-            nn.Linear(embedding_size, vocab_size)
-        )
         self.pad_token_id = pad_token_id
+        self.register_buffer('pe', self._create_positional_encoding(seq_len, embedding_size))
+        self.embedding = embedding
+        if not embedding:
+            self.embedding = nn.Embedding(vocab_size, embedding_size)
+            # Claude recommended this initialization
+            nn.init.normal_(self.embedding.weight, mean=0, std=embedding_size ** -0.5)
+
+        self.decoder_layers = nn.ModuleList([
+            DecoderLayer(embedding_size, seq_len, num_attention_heads, *args, **kwargs)
+            for _ in range(num_layers)
+        ])
+        self.output_projection = nn.Linear(embedding_size, vocab_size)
 
     @staticmethod
     def _create_positional_encoding(seq_len, d_model):
@@ -77,6 +98,13 @@ class Transformer(nn.Module):
         return pe
 
     def forward(self, token_ids):
+        padding_mask = (token_ids == self.pad_token_id)
+
         embedded = self.embedding(token_ids)
         encoded = embedded + self.pe.unsqueeze(0)
-        return self.decoder(encoded)
+
+        hidden_state = encoded
+        for layer in self.decoder_layers:
+            hidden_state = layer(hidden_state, padding_mask)
+
+        return self.output_projection(hidden_state)
