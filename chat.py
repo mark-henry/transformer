@@ -2,6 +2,7 @@ import torch
 from transformers import AutoTokenizer
 from accelerate import Accelerator
 from pathlib import Path
+import math
 
 from transformer import Transformer
 
@@ -37,8 +38,8 @@ def load_model(model_path):
                       if k.startswith('decoder_layers.')
                       and k.endswith('.layer_norm1.weight'))
 
-    print(f"Loaded model config: embedding_size={embedding_size}, seq_len={seq_len}, "
-          f"heads={head_count}, layers={layer_count}")
+    print(f"Loaded model config: embedding_size={embedding_size}, seq_len={seq_len}, heads={head_count}, "
+          f"layers={layer_count}, epoch={checkpoint['epoch']} val_perplexity={math.exp(checkpoint['val_loss'])}")
 
     model = Transformer(
         embedding_size=embedding_size,
@@ -56,7 +57,7 @@ def load_model(model_path):
     return model, tokenizer, accelerator
 
 
-def generate_text(model, tokenizer, accelerator, prompt, max_length=50, temperature=0.7):
+def generate_text(model, tokenizer, accelerator, prompt, max_length=50, temperature=0.1):
     model.eval()
     # Get the device from the model
     device = next(model.parameters()).device
