@@ -44,6 +44,7 @@ class TokenizedDataset(Dataset):
         # To minimize GPU footprint, create torch tensor only when needed
         return {'input_ids': torch.tensor(self.tokens[idx:idx + self.context_size], dtype=torch.long)}
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a transformer model')
     parser.add_argument('--checkpoint', type=str, help='Path to existing model checkpoint')
@@ -57,11 +58,11 @@ def parse_args():
     parser.add_argument('--head-count', type=int, default=8, help='Number of attention heads')
     parser.add_argument('--layer-count', type=int, default=6, help='Number of transformer layers')
     parser.add_argument('--train-embeddings', action='store_true',
-                       help='Train embeddings from scratch instead of using GPT2 pretrained')
+                        help='Train embeddings from scratch instead of using GPT2 pretrained')
     parser.add_argument("--dataset", type=str, default="Salesforce/wikitext/wikitext-2-v1",
-                       help="HF dataset path and name to train on")
+                        help="HF dataset path and name to train on")
     parser.add_argument("--grad-clip", type=float, default=1.0,
-                       help="Maximum norm for gradient clipping")
+                        help="Maximum norm for gradient clipping")
     return parser.parse_args()
 
 
@@ -89,7 +90,7 @@ def load_or_create_model(args, vocab_size, pad_token_id):
         model.embedding.weight.requires_grad = False
 
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),
-                          lr=args.lr)
+                           lr=args.lr)
     start_epoch = 0
     best_loss = float('inf')
 
@@ -108,18 +109,20 @@ def load_or_create_model(args, vocab_size, pad_token_id):
     return model, optimizer, start_epoch, best_loss
 
 
-def evaluate(model, dataloader, criterion):
+def evaluate(model, dataloader, criterion, max_batches=75):
     model.eval()
     total_loss = 0
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Validating"):
+        for i, batch in enumerate(dataloader):
+            if i >= max_batches:
+                break
             input_ids = batch['input_ids']
             outputs = model(input_ids)
             targets = torch.roll(input_ids, -1, dims=1)
             targets[:, -1] = input_ids[:, 0]
             loss = criterion(outputs.view(-1, outputs.size(-1)), targets.view(-1))
             total_loss += loss.item()
-    return total_loss / len(dataloader)
+    return total_loss / min(max_batches, len(dataloader))
 
 
 def train():
@@ -133,9 +136,9 @@ def train():
     val_dataset = TokenizedDataset('validation', args.context_size, args.dataset)
 
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
+                                  num_workers=4, pin_memory=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True,
                                 num_workers=4, pin_memory=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
-                              num_workers=4, pin_memory=True)
 
     model, optimizer, start_epoch, best_loss = load_or_create_model(
         args, tokenizer.vocab_size, tokenizer.pad_token_id
@@ -148,24 +151,26 @@ def train():
 
     print("Starting training.", flush=True)
     Path("models").mkdir(exist_ok=True)
-    model_path = f"models/transformer_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.pt"
+    base_path = f"models/transformer_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    last_checkpoint = 0
+    examples_processed = 0
+    checkpoint_freq = 1000  # num examples between checkpoints
 
     for epoch in range(start_epoch, args.epochs):
         model.train()
-        epoch_steps = 0
         epoch_loss = 0
+        epoch_steps = 0
 
         progress_bar = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc=f"Epoch {epoch + 1}")
         for step, batch in progress_bar:
             optimizer.zero_grad()
             input_ids = batch['input_ids']
             outputs = model(input_ids)
-            # Predict next token, using first token as target for last position
             targets = torch.roll(input_ids, -1, dims=1)
             targets[:, -1] = input_ids[:, 0]
 
             loss = criterion(outputs.view(-1, outputs.size(-1)), targets.view(-1))
-
             accelerator.backward(loss)
 
             if args.grad_clip > 0:
@@ -175,36 +180,36 @@ def train():
                 )
 
             optimizer.step()
+            examples_processed += args.batch_size
 
             epoch_loss += loss.item()
             epoch_steps += 1
             avg_loss = epoch_loss / epoch_steps
+
             progress_bar.set_postfix({
                 'loss': f'{loss.item():.3f}',
-                'epoch_loss': f'{avg_loss:.3f}',
-                'epoch_ppl': f'{math.exp(avg_loss):.0f}'
+                'avg_loss': f'{avg_loss:.3f}',
+                'ppl': f'{math.exp(avg_loss):.0f}'
             })
 
-        # Epoch completion stats
-        train_loss = epoch_loss / len(train_dataloader)
-        val_loss = evaluate(model, val_dataloader, criterion)
-        print(f'\nEpoch {epoch + 1} Complete:')
-        print(f'Train Loss: {train_loss:.4f} (ppl: {math.exp(train_loss):.0f})')
-        print(f'Val Loss: {val_loss:.4f} (ppl: {math.exp(val_loss):.0f})')
+            if examples_processed - last_checkpoint >= checkpoint_freq:
+                val_loss = evaluate(model, val_dataloader, criterion)
+                print(f'\nExamples {examples_processed}:')
+                print(f'Train Loss: {avg_loss:.4f} (ppl: {math.exp(avg_loss):.0f})')
+                print(f'Val Loss: {val_loss:.4f} (ppl: {math.exp(val_loss):.0f})')
 
-        # Save if validation improves
-        if val_loss < best_loss:
-            best_loss = val_loss
-            unwrapped_model = accelerator.unwrap_model(model)
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': unwrapped_model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': train_loss,
-                'val_loss': val_loss,
-                'best_loss': best_loss,
-            }, model_path)
-            print(f"New best model saved to {model_path}")
+                unwrapped_model = accelerator.unwrap_model(model)
+                checkpoint_path = f"{base_path}_after{examples_processed}.pt"
+                torch.save({
+                    'examples': examples_processed,
+                    'epoch': epoch,
+                    'model_state_dict': unwrapped_model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'train_loss': avg_loss,
+                    'val_loss': val_loss,
+                }, checkpoint_path)
+                print(f"Checkpoint saved to {checkpoint_path}")
+                model.train()
 
 
 if __name__ == "__main__":
