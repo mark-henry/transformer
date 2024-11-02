@@ -15,7 +15,8 @@ def pad(token_ids, length, pad_token_id):
 
 def load_model(model_path):
     accelerator = Accelerator()
-    tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+    tokenizer = AutoTokenizer.from_pretrained('GPT2')
+    tokenizer.pad_token = tokenizer.eos_token
 
     # Load checkpoint and configuration
     checkpoint = torch.load(model_path, weights_only=True)
@@ -63,7 +64,7 @@ def generate_text(model, tokenizer, accelerator, prompt, max_length=50, temperat
     device = next(model.parameters()).device
 
     # Move input to correct device
-    prompt += ' ' + tokenizer.sep_token
+    # prompt += ' ' + tokenizer.eos_token
     input_ids = tokenizer.encode(prompt, return_tensors='pt')[0].to(device)
 
     generated = []

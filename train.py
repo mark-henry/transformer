@@ -48,11 +48,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train a transformer model')
     parser.add_argument('--checkpoint', type=str, help='Path to existing model checkpoint')
     parser.add_argument('--epochs', type=int, default=1, help='Number of epochs to train')
-    parser.add_argument('--batch-size', type=int, default=32, help='Batch size for training')
+    parser.add_argument('--batch-size', type=int, default=128, help='Batch size for training')
     # NVIDIA A100-SXM4-80GB context 64 batch_size 1024
     # Tesla V100-SXM2-16GB context 64 batch_size 192
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--context-size', type=int, default=512, help='Context size for transformer')
+    parser.add_argument('--context-size', type=int, default=128, help='Context size for transformer')
     parser.add_argument('--embedding-size', type=int, default=768, help='Model embedding size')
     parser.add_argument('--head-count', type=int, default=8, help='Number of attention heads')
     parser.add_argument('--layer-count', type=int, default=6, help='Number of transformer layers')
