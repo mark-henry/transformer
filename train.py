@@ -140,7 +140,8 @@ def load_or_create_model(args, vocab_size, pad_token_id):
         if not checkpoint_path.exists():
             raise ValueError(f"Checkpoint {args.checkpoint} not found")
         print(f"Loading checkpoint from {args.checkpoint}")
-        checkpoint = torch.load(args.checkpoint, weights_only=True)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=True)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1

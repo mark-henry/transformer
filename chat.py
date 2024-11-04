@@ -21,7 +21,7 @@ def load_model(model_path):
     tokenizer = AutoTokenizer.from_pretrained('GPT2')
     tokenizer.pad_token = tokenizer.eos_token
     # Load checkpoint and configuration
-    checkpoint = torch.load(model_path, weights_only=True)
+    checkpoint = torch.load(model_path, weights_only=True, map_location=accelerator.device)
     model_state = checkpoint['model_state_dict']
     # Infer embedding size from embedding weights
     embedding_weight = model_state['embedding.weight']
@@ -80,7 +80,7 @@ def generate_text(model, tokenizer, accelerator, prompt, max_length=50, temperat
             input_ids = torch.cat([input_ids[1:], next_token.view(-1)])
 
             # Optional: Break if we generate an end token
-            if len(generated) > 5 and next_token.item() == tokenizer.sep_token_id:
+            if len(generated) > 5 and next_token.item() == tokenizer.eos_token_id:
                 break
 
     return tokenizer.decode(generated)
