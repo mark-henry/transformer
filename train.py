@@ -41,7 +41,6 @@ class TokenizedDataset(Dataset):
 
     def __getitem__(self, idx):
         # Get a slice of tokens starting at idx
-        # To minimize GPU footprint, create torch tensor only when needed
         return {'input_ids': torch.tensor(self.tokens[idx:idx + self.context_size], dtype=torch.long)}
 
 
@@ -103,13 +102,13 @@ def load_or_create_model(args, vocab_size, pad_token_id):
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
-        best_loss = checkpoint.get('best_loss', float('inf'))
+        best_loss = checkpoint.get('val_loss', float('inf'))
         print(f"Resumed from after epoch {start_epoch} with val perplexity {math.exp(best_loss):.4f}")
 
     return model, optimizer, start_epoch, best_loss
 
 
-def evaluate(model, dataloader, criterion, max_batches=75):
+def evaluate(model, dataloader, criterion, max_batches=250):
     model.eval()
     total_loss = 0
     with torch.no_grad():
@@ -153,11 +152,11 @@ def train():
     Path("models").mkdir(exist_ok=True)
     base_path = f"models/transformer_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    last_checkpoint = 0
-    examples_processed = 0
-    checkpoint_freq = 1000  # num examples between checkpoints
+    checkpoint_freq = 100000  # num examples between checkpoints
 
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in range(start_epoch, max(start_epoch + 1, args.epochs)):
+        last_checkpoint = 0
+        examples_processed = 0
         model.train()
         epoch_loss = 0
         epoch_steps = 0
@@ -189,27 +188,38 @@ def train():
             progress_bar.set_postfix({
                 'loss': f'{loss.item():.3f}',
                 'avg_loss': f'{avg_loss:.3f}',
-                'ppl': f'{math.exp(avg_loss):.0f}'
+                'ppl': f'{math.exp(avg_loss):.0f}',
+                'examples': examples_processed
             })
 
             if examples_processed - last_checkpoint >= checkpoint_freq:
-                val_loss = evaluate(model, val_dataloader, criterion)
-                print(f'\nExamples {examples_processed}:')
-                print(f'Train Loss: {avg_loss:.4f} (ppl: {math.exp(avg_loss):.0f})')
-                print(f'Val Loss: {val_loss:.4f} (ppl: {math.exp(val_loss):.0f})')
+                checkpoint_suffix = f"{epoch}_{examples_processed}"
+                checkpoint(accelerator, avg_loss, base_path, checkpoint_suffix, criterion, epoch, examples_processed,
+                           model, optimizer, val_dataloader)
+                last_checkpoint = examples_processed
 
-                unwrapped_model = accelerator.unwrap_model(model)
-                checkpoint_path = f"{base_path}_after{examples_processed}.pt"
-                torch.save({
-                    'examples': examples_processed,
-                    'epoch': epoch,
-                    'model_state_dict': unwrapped_model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'train_loss': avg_loss,
-                    'val_loss': val_loss,
-                }, checkpoint_path)
-                print(f"Checkpoint saved to {checkpoint_path}")
-                model.train()
+        checkpoint(accelerator, avg_loss, base_path, f"epoch{epoch}", criterion, epoch, examples_processed,
+                   model, optimizer, val_dataloader)
+
+
+def checkpoint(accelerator, avg_loss, base_path, checkpoint_suffix, criterion, epoch, examples_processed, model,
+               optimizer, val_dataloader):
+    val_loss = evaluate(model, val_dataloader, criterion)
+    print(f'\nEpoch {epoch} examples {examples_processed}:')
+    print(f'Train Loss: {avg_loss:.4f} (ppl: {math.exp(avg_loss):.0f})')
+    print(f'Val Loss: {val_loss:.4f} (ppl: {math.exp(val_loss):.0f})')
+    unwrapped_model = accelerator.unwrap_model(model)
+    checkpoint_path = f"{base_path}_{checkpoint_suffix}.pt"
+    torch.save({
+        'examples': examples_processed,
+        'epoch': epoch,
+        'model_state_dict': unwrapped_model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'train_loss': avg_loss,
+        'val_loss': val_loss,
+    }, checkpoint_path)
+    print(f"Checkpoint saved to {checkpoint_path}", flush=True)
+    model.train()
 
 
 if __name__ == "__main__":
