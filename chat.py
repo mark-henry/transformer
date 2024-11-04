@@ -6,40 +6,38 @@ import math
 import argparse
 from transformer import Transformer
 
-def pad(token_ids, length, pad_token_id):
-    padded_ids = torch.full([length], pad_token_id, dtype=torch.long)
-    padded_ids[:token_ids.size(0)] = token_ids
-    return padded_ids
+
+def pad_left(token_ids, length, pad_token_id):
+    if len(token_ids) >= length:
+        return token_ids[-length:]
+
+    padding_length = length - len(token_ids)
+    padding = torch.full([padding_length], pad_token_id, dtype=torch.long, device=token_ids.device)
+    return torch.cat([padding, token_ids])
+
 
 def load_model(model_path):
     accelerator = Accelerator()
     tokenizer = AutoTokenizer.from_pretrained('GPT2')
     tokenizer.pad_token = tokenizer.eos_token
-
     # Load checkpoint and configuration
     checkpoint = torch.load(model_path, weights_only=True)
     model_state = checkpoint['model_state_dict']
-
     # Infer embedding size from embedding weights
     embedding_weight = model_state['embedding.weight']
     vocab_size, embedding_size = embedding_weight.shape
-
     # Get sequence length from positional encoding
     seq_len = model_state['pe'].shape[0]
-
     # Count attention heads from first layer
     head_count = sum(1 for k in model_state.keys()
                      if k.startswith('decoder_layers.0.attention_heads.')
                      and k.endswith('.Q.weight'))
-
     # Count layers
     layer_count = sum(1 for k in model_state.keys()
                       if k.startswith('decoder_layers.')
                       and k.endswith('.layer_norm1.weight'))
-
     print(f"Loaded model config: embedding_size={embedding_size}, seq_len={seq_len}, heads={head_count}, "
           f"layers={layer_count}, epoch={checkpoint['epoch']} val_perplexity={math.exp(checkpoint['val_loss'])}")
-
     model = Transformer(
         embedding_size=embedding_size,
         vocab_size=vocab_size,
@@ -53,27 +51,40 @@ def load_model(model_path):
     model.eval()
     return model, tokenizer, accelerator
 
+
 def generate_text(model, tokenizer, accelerator, prompt, max_length=50, temperature=0.1):
     model.eval()
-    # Get the device from the model
     device = next(model.parameters()).device
-    # Move input to correct device
+
+    # Initialize sequence with prompt
     input_ids = tokenizer.encode(prompt, return_tensors='pt')[0].to(device)
     generated = []
 
+    # Ensure we have exactly seq_len tokens, padded on the left if necessary
+    input_ids = pad_left(input_ids, model.seq_len, tokenizer.pad_token_id)
+
     with torch.no_grad():
         for _ in range(max_length):
-            input_ids = pad(input_ids, model.seq_len, tokenizer.pad_token_id).to(device)
-            outputs = model(input_ids.unsqueeze(0))
-            next_token_logits = outputs[0, -1, :] / temperature
+            # Get model prediction
+            outputs = model(input_ids.unsqueeze(0))  # Shape: (1, seq_len, vocab_size)
+            next_token_logits = outputs[0, -1, :] / temperature  # Shape: (vocab_size,)
+
+            # Sample next token
             probs = torch.softmax(next_token_logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1).squeeze()
+
+            # Add to generated sequence
             generated.append(next_token.item())
+
+            # Prepare input for next iteration by appending new token
             input_ids = torch.cat([input_ids[1:], next_token.view(-1)])
+
+            # Optional: Break if we generate an end token
             if len(generated) > 5 and next_token.item() == tokenizer.sep_token_id:
                 break
 
     return tokenizer.decode(generated)
+
 
 def main():
     parser = argparse.ArgumentParser(description='Chat with a transformer model')
@@ -117,6 +128,7 @@ def main():
             print(f"Model: {response}")
     except KeyboardInterrupt:
         print("\nExiting chat...")
+
 
 if __name__ == "__main__":
     main()

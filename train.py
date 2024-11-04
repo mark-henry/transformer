@@ -17,31 +17,77 @@ from transformer import Transformer
 
 
 class TokenizedDataset(Dataset):
+    """Dataset that yields padded sliding windows over tokenized text documents.
+
+    For a context size of 3 and document "a b c d", yields examples:
+        inputs      targets
+        [p p a] --> [p a b]
+        [p a b] --> [a b c]
+        [a b c] --> [b c d]
+        [b c d] --> [c d e]
+    where p=pad_token and e=eos_token.
+
+    This approach ensures the model:
+    1. Learns to handle short prompts via left-padded examples
+    2. Sees all possible subsequences of each document
+    3. Properly learns next-token prediction, not input repetition
+
+    Memory efficient: Stores only raw tokens and computes examples on-the-fly.
+
+    Args:
+        split (str): Dataset split to use ('train' or 'validation')
+        context_size (int): Size of input sequence windows
+        dataset_path (str): HuggingFace dataset path (e.g. 'Salesforce/wikitext/wikitext-2-v1')
+
+    Returns:
+        Dict with keys:
+            input_ids: torch.LongTensor of shape (context_size)
+            target_ids: torch.LongTensor of shape (context_size)
+    """
+
     def __init__(self, split, context_size, dataset_path):
         self.context_size = context_size
         dataset_head, dataset_name = os.path.split(dataset_path)
-        cache_name = dataset_path.replace('/', '_')
         dataset = load_dataset(dataset_head, dataset_name)[split]
-        tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-        tokenizer.pad_token = tokenizer.eos_token
+
+        self.tokenizer = GPT2Tokenizer.from_pretrained("openai-community/gpt2",
+                                                       add_prefix_space=True,
+                                                       add_bos_token=True)
+        self.tokenizer.pad_token = self.tokenizer.bos_token
 
         tokenized = dataset.map(
-            lambda x: tokenizer(x['text'], truncation=False),
+            lambda x: self.tokenizer(x['text'], truncation=False),
             batched=True,
             desc=f"Tokenizing {split}",
             num_proc=os.cpu_count() - 1,
-            cache_file_name=f"cache/tokenized/{cache_name}_{split}.arrow",
+            cache_file_name=f"cache/tokenized/{dataset_path.replace('/', '_')}_{split}.arrow",
         )
-        # Store as np.int32 instead of int64 to halve memory usage
-        self.tokens = np.concatenate(tokenized['input_ids']).astype(np.int32)
-        self.num_examples = len(self.tokens) - context_size
+
+        # Store tokens with padding and EOS for each document
+        tokens = []
+        for token_ids in tokenized['input_ids']:
+            padded = np.concatenate([
+                np.full(context_size, self.tokenizer.pad_token_id),
+                token_ids,
+                [self.tokenizer.eos_token_id]
+            ])
+            tokens.extend(padded)
+
+        self.tokens = np.array(tokens, dtype=np.int32)
+        self.stride = context_size + 1  # Distance between start of each document
 
     def __len__(self):
-        return self.num_examples
+        return (len(self.tokens) - self.context_size) // self.stride * self.stride
 
     def __getitem__(self, idx):
-        # Get a slice of tokens starting at idx
-        return {'input_ids': torch.tensor(self.tokens[idx:idx + self.context_size], dtype=torch.long)}
+        start_idx = idx
+        input_ids = self.tokens[start_idx:start_idx + self.context_size]
+        target_ids = self.tokens[start_idx + 1:start_idx + self.context_size + 1]
+
+        return {
+            'input_ids': torch.tensor(input_ids, dtype=torch.long),
+            'target_ids': torch.tensor(target_ids, dtype=torch.long)
+        }
 
 
 def parse_args():
@@ -49,8 +95,6 @@ def parse_args():
     parser.add_argument('--checkpoint', type=str, help='Path to existing model checkpoint')
     parser.add_argument('--epochs', type=int, default=1, help='Number of epochs to train')
     parser.add_argument('--batch-size', type=int, default=128, help='Batch size for training')
-    # NVIDIA A100-SXM4-80GB context 64 batch_size 1024
-    # Tesla V100-SXM2-16GB context 64 batch_size 192
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--context-size', type=int, default=128, help='Context size for transformer')
     parser.add_argument('--embedding-size', type=int, default=768, help='Model embedding size')
@@ -66,8 +110,6 @@ def parse_args():
 
 
 def load_or_create_model(args, vocab_size, pad_token_id):
-    """Initialize model, optimizer, and training state, optionally from checkpoint."""
-    # Get pretrained embeddings if not training from scratch
     embedding = None
     if not args.train_embeddings and not args.checkpoint:
         print("Loading pretrained GPT2 embeddings...")
@@ -116,10 +158,9 @@ def evaluate(model, dataloader, criterion, max_batches=250):
             if i >= max_batches:
                 break
             input_ids = batch['input_ids']
+            target_ids = batch['target_ids']
             outputs = model(input_ids)
-            targets = torch.roll(input_ids, -1, dims=1)
-            targets[:, -1] = input_ids[:, 0]
-            loss = criterion(outputs.view(-1, outputs.size(-1)), targets.view(-1))
+            loss = criterion(outputs.view(-1, outputs.size(-1)), target_ids.view(-1))
             total_loss += loss.item()
     return total_loss / min(max_batches, len(dataloader))
 
@@ -127,8 +168,10 @@ def evaluate(model, dataloader, criterion, max_batches=250):
 def train():
     args = parse_args()
     accelerator = Accelerator()
-    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = GPT2Tokenizer.from_pretrained("openai-community/gpt2",
+                                              add_prefix_space=True,
+                                              add_bos_token=True)
+    tokenizer.pad_token = tokenizer.bos_token
 
     print("loading datasets...")
     train_dataset = TokenizedDataset('train', args.context_size, args.dataset)
@@ -165,11 +208,9 @@ def train():
         for step, batch in progress_bar:
             optimizer.zero_grad()
             input_ids = batch['input_ids']
+            target_ids = batch['target_ids']
             outputs = model(input_ids)
-            targets = torch.roll(input_ids, -1, dims=1)
-            targets[:, -1] = input_ids[:, 0]
-
-            loss = criterion(outputs.view(-1, outputs.size(-1)), targets.view(-1))
+            loss = criterion(outputs.view(-1, outputs.size(-1)), target_ids.view(-1))
             accelerator.backward(loss)
 
             if args.grad_clip > 0:
